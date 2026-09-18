@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Data Agent — Text-to-SQL 数据分析</title>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<style>
+  /* 极简样式：能看清过程即可，不追求视觉效果 */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "Microsoft YaHei", system-ui, sans-serif; background: #f5f6fa; color: #2f3640; }
+  #app { max-width: 760px; margin: 24px auto; padding: 0 16px; }
+  header h1 { font-size: 20px; margin-bottom: 4px; }
+  header p { font-size: 12px; color: #718093; margin-bottom: 16px; }
+  .chat-box { background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.08); padding: 16px; min-height: 420px; display: flex; flex-direction: column; }
+  .messages { flex: 1; overflow-y: auto; }
+  .msg { margin-bottom: 14px; }
+  .msg .q { font-weight: 600; margin-bottom: 6px; }
+  .msg .a { background: #f0f4ff; border-left: 3px solid #4a69bd; padding: 8px 12px; border-radius: 4px; white-space: pre-wrap; }
+  .steps { font-size: 12px; color: #786fa6; margin: 6px 0; padding-left: 4px; }
+  .steps div { padding: 1px 0; }
+  .steps .ev { display: inline-block; min-width: 76px; color: #303952; font-weight: 600; }
+  .input-row { display: flex; gap: 8px; margin-top: 12px; }
+  .input-row input { flex: 1; padding: 10px 12px; border: 1px solid #dcdde1; border-radius: 6px; font-size: 14px; }
+  .input-row button { padding: 10px 22px; border: 0; background: #4a69bd; color: #fff; border-radius: 6px; cursor: pointer; font-size: 14px; }
+  .input-row button:disabled { background: #a4b0be; cursor: not-allowed; }
+  .error { color: #e55039; font-size: 13px; }
+  .examples { font-size: 12px; color: #718093; margin-top: 8px; }
+  .examples span { cursor: pointer; color: #4a69bd; margin-right: 12px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>AI Data Agent</h1>
+    <p>FastAPI + LangGraph + RAG + Tool Calling + Text-to-SQL — 过程实时可见</p>
+  </header>
+
+  <div class="chat-box">
+    <div class="messages">
+      <div class="msg" v-for="m in messages" :key="m.id">
+        <div class="q">你：{{ m.question }}</div>
+        <div class="steps" v-if="m.steps.length">
+          <div v-for="(s, i) in m.steps" :key="i">
+            <span class="ev">{{ s.event }}</span>{{ s.data }}
+          </div>
+        </div>
+        <div class="a" v-if="m.answer">{{ m.answer }}</div>
+        <div class="error" v-if="m.error">{{ m.error }}</div>
+      </div>
+    </div>
+
+    <div class="input-row">
+      <input v-model="draft" :disabled="busy" placeholder="例如：查询2026年销售额最高的商品" @keyup.enter="send">
+      <button :disabled="busy || !draft.trim()" @click="send">{{ busy ? '分析中...' : '发送' }}</button>
+    </div>
+    <div class="examples" v-if="messages.length === 0">
+      试试：
+      <span @click="draft = '查询2026年销售额最高的商品'">查询2026年销售额最高的商品</span>
+      <span @click="draft = '查询2025年的月度销售额'">查询2025年的月度销售额</span>
+      <span @click="draft = '那2024年呢？'">那2024年呢？（多轮追问）</span>
+    </div>
+  </div>
+</div>
+
+<script>
+const { createApp, ref } = Vue;
+
+// SSE via fetch: EventSource only supports GET, but our endpoint is POST
+// with a JSON body — so we read the response stream and parse the
+// "event: X\ndata: Y\n\n" frames manually.
+async function streamSSE(payload, onEvent) {
+  const resp = await fetch('/api/chat/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    // SSE frames are separated by a blank line.
+    let idx;
+    while ((idx = buffer.indexOf('\n\n')) !== -1) {
+      const frame = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      let event = 'message', data = '';
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('event: ')) event = line.slice(7);
+        else if (line.startsWith('data: ')) data += line.slice(6);
+      }
+      if (data) {
+        try { data = JSON.parse(data); } catch (e) { /* keep raw */ }
+        onEvent(event, data);
+      }
+    }
+  }
+}
+
+createApp({
+  setup() {
+    // conversation_id is generated once per browser session; reusing it on
+    // every question is what makes multi-turn follow-ups ("那2024年呢?") work.
+    const conversationId = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now());
+    const messages = ref([]);
+    const draft = ref('');
+    const busy = ref(false);
+    let seq = 0;
+
+    async function send() {
+      const question = draft.value.trim();
+      if (!question || busy.value) return;
+      draft.value = '';
+      busy.value = true;
+
+      const msg = { id: ++seq, question, steps: [], answer: '', error: '' };
+      messages.value.push(msg);
+
+      try {
+        await streamSSE({ question, conversation_id: conversationId }, (event, data) => {
+          if (event === 'done') return;                    // terminal sentinel
+          if (event === 'error') { msg.error = String(data); return; }
+          if (event === 'answer') { msg.answer = String(data); return; }
+          msg.steps.push({ event, data: String(data) });   // progress timeline
+        });
+      } catch (e) {
+        msg.error = '连接失败: ' + e.message;
+      } finally {
+        busy.value = false;
+      }
+    }
+
+    return { messages, draft, busy, send };
+  },
+}).mount('#app');
+</script>
+</body>
+</html>

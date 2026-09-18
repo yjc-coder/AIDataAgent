@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Env
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Build / dist
+dist/
+build/
+
+# Data (Phase 2+)
+data/chroma/
+*.db
+*.sqlite
+
+# Tool local settings
+.claude/settings.local.json

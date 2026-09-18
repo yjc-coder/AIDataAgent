@@ -1,0 +1,74 @@
+# AI Data Agent — MySQL 8.0 + the FastAPI app (API + Vue3 page).
+#
+# Two MySQL accounts:
+#   * root / rootpass       — admin (used by data/seed_data.py to TRUNCATE/INSERT)
+#   * readonly / readonly   — used by the app at runtime; SELECT-only
+#
+# First boot only:
+#   * MySQL mounts data/product_schema.sql at /docker-entrypoint-initdb.d/,
+#     so the schema is auto-created. Re-running is harmless.
+#
+# Start everything:
+#   docker compose up -d --build
+# Then open:  http://localhost:8065/
+#
+# Stop (keep data):   docker compose stop
+# Wipe data:          docker compose down -v
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: ai-data-agent-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: demo
+      MYSQL_USER: readonly
+      MYSQL_PASSWORD: readonly
+      TZ: Asia/Shanghai
+    ports:
+      - "3308:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./data/product_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test:
+        - "CMD"
+        - "mysqladmin"
+        - "ping"
+        - "-h"
+        - "127.0.0.1"
+        - "-uroot"
+        - "-prootpass"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  app:
+    build: .
+    container_name: ai-data-agent-app
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      # Inside the compose network, MySQL is reachable as "mysql".
+      DB_HOST: mysql
+      # Keys come from .env next to this file (never hardcode them here).
+      LLM_API_KEY: ${LLM_API_KEY:-your-api-key-here}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      LLM_MODEL: ${LLM_MODEL:-qwen-plus}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-your-api-key-here}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v3}
+      # Chroma index lives on a named volume so it survives rebuilds.
+      CHROMA_DIR: /app/data/chroma
+    ports:
+      - "8065:8065"
+    volumes:
+      - chroma_data:/app/data/chroma
+
+volumes:
+  mysql_data:
+  chroma_data:
