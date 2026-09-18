@@ -24,6 +24,7 @@ from app.agent.state import (
     KEY_ERROR,
     KEY_FINAL_ANSWER,
     KEY_GENERATED_REASONING,
+    KEY_HISTORY,
     KEY_GENERATED_SQL,
     KEY_INTENT,
     KEY_NODE_PATH,
@@ -331,24 +332,40 @@ async def tool_call_node(state: AgentState) -> dict[str, Any]:
 
 def _format_prev_steps(state: AgentState) -> str:
     """
-    格式化上一轮对话上下文，填充Prompt里的PREVIOUS_STEPS占位
+    格式化最近几轮对话上下文，填充Prompt里的PREVIOUS_STEPS占位
 
     第8阶段多轮对话场景：例如第一轮“查询2026年销售额”，第二轮“那2025年呢？”
     SQL生成器需要上一轮问题/SQL，才能理解指代（那）。
+    【跨多轮指代】state.history 携带最近多轮（新→旧）时逐轮渲染，
+    支撑“那前年呢？”这类跨三轮引用。
     首轮对话返回 "(none)"
     """
+    history = state.get(KEY_HISTORY, []) or []
     prev_q = state.get(KEY_PREV_QUESTION, "") or ""
-    if not prev_q:
+    if not history and not prev_q:
         return "(none)"
-    parts = [f"上一轮用户问题: {prev_q}"]
-    prev_sql = state.get(KEY_PREV_SQL, "") or ""
-    if prev_sql:
-        parts.append(f"上一轮生成SQL: {prev_sql}")
-    prev_answer = state.get(KEY_PREV_ANSWER, "") or ""
-    if prev_answer:
-        parts.append(f"上一轮返回答案: {prev_answer}")
+
+    # history 缺失时（旧调用方/测试只填 prev_* 槽位）退化为单轮视图
+    turns = list(history) or [
+        {
+            "question": prev_q,
+            "sql": state.get(KEY_PREV_SQL, "") or "",
+            "answer": state.get(KEY_PREV_ANSWER, "") or "",
+        }
+    ]
+
+    labels = ["上一轮", "更早一轮", "更早两轮", "更早三轮"]
+    parts: list[str] = []
+    for i, turn in enumerate(turns[: len(labels)]):
+        label = labels[i]
+        parts.append(f"{label}用户问题: {turn.get('question', '')}")
+        if turn.get("sql"):
+            parts.append(f"{label}生成SQL: {turn['sql']}")
+        if turn.get("answer"):
+            parts.append(f"{label}返回答案: {turn['answer']}")
+
     parts.append(
-        "如果当前问题包含【那】这类指代，需要参考上一轮问题理解语义。"
+        "如果当前问题包含【那】【前年】这类指代，需要结合以上多轮对话理解语义。"
     )
     return "\n".join(parts)
 

@@ -132,8 +132,8 @@ async def test_different_conversations_do_not_leak_context(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_third_turn_carries_second_turn_context(monkeypatch):
-    """上下文滚动：第三轮看到的是第二轮，不是第一轮。"""
+async def test_third_turn_carries_both_earlier_turns(monkeypatch):
+    """【跨多轮指代】第三轮同时看到第二轮（上一轮）和第一轮（更早一轮）。"""
     from app.agent.run_graph import run_question
 
     captor = _CapturingT2S(sql="SELECT 2 AS v")
@@ -145,7 +145,7 @@ async def test_third_turn_carries_second_turn_context(monkeypatch):
 
     prev = captor.calls[2]["previous_steps"]
     assert "上一轮用户问题: q2" in prev
-    assert "q1" not in prev  # only the immediately previous turn
+    assert "更早一轮用户问题: q1" in prev  # 跨三轮引用：第一轮上下文仍在场
 
 
 # ---------------------------------------------------------------------------
@@ -249,3 +249,56 @@ async def test_text2sql_prompt_receives_history():
     assert "上一轮用户问题: 查询2026年销售额" in text
     assert "那2025年呢？" in text
     assert "orders table" in text  # tool-provided chunk reached the schema slot
+
+
+# ---------------------------------------------------------------------------
+# 跨多轮指代（第11阶段）—— 查询2026年销售额 → 那2025年呢 → 那前年呢
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_third_turn_receives_three_turns_of_context(monkeypatch):
+    """第三轮"那前年呢？"必须同时看到前两轮的问题/SQL/答案。"""
+    from app.agent.run_graph import run_question
+
+    captor = _CapturingT2S()
+    _wire_graph(monkeypatch, captor)
+
+    conv = "conv-mt-cross3"
+    await run_question("查询2026年销售额", conv)
+    await run_question("那2025年呢？", conv)
+    res = await run_question("那前年呢？", conv)
+
+    assert res.error is None
+    assert len(captor.calls) == 3
+    prev = captor.calls[2]["previous_steps"]
+
+    # 最近一轮
+    assert "上一轮用户问题: 那2025年呢？" in prev
+    # 更早的两轮也在场（跨三轮引用的核心）
+    assert "更早一轮用户问题: 查询2026年销售额" in prev
+    # 提示词包含跨轮指代引导
+    assert "前年" in prev
+
+
+@pytest.mark.asyncio
+async def test_history_is_capped_at_three_turns(monkeypatch):
+    """上限=最近3轮：第4轮能看到第3/2/1轮；第5轮起第1轮被截断。"""
+    from app.agent.run_graph import run_question
+
+    captor = _CapturingT2S()
+    _wire_graph(monkeypatch, captor)
+
+    conv = "conv-mt-cap"
+    await run_question("查询第1个问题", conv)
+    await run_question("查询第2个问题", conv)
+    await run_question("查询第3个问题", conv)
+    await run_question("查询第4个问题", conv)
+    res = await run_question("查询第5个问题", conv)
+
+    assert res.error is None
+    prev = captor.calls[4]["previous_steps"]
+    assert "查询第4个问题" in prev   # 上一轮
+    assert "查询第3个问题" in prev   # 更早一轮
+    assert "查询第2个问题" in prev   # 更早两轮
+    assert "查询第1个问题" not in prev  # 超出3轮上限，最早一轮被截断

@@ -52,6 +52,7 @@ KEY_TOOL_ERROR = "tool_error"
 KEY_PREV_QUESTION = "prev_question" # str：上一轮用户提问，首轮为空字符串
 KEY_PREV_SQL = "prev_sql"           # str：上一轮生成的SQL语句
 KEY_PREV_ANSWER = "prev_answer"     # str：上一轮返回给用户的最终回答
+KEY_HISTORY = "history"             # list[dict]：最近多轮对话（新→旧），支持"那前年呢"跨三轮指代
 
 
 # ===================== 用户意图枚举常量 =====================
@@ -108,6 +109,7 @@ class AgentState(TypedDict, total=False):
     prev_question: str                 # 上一轮用户提问，第一轮为空字符串
     prev_sql: str                      # 上一轮生成的SQL
     prev_answer: str                   # 上一轮输出给用户的最终答案
+    history: list[dict]                # 最近多轮对话上下文（新→旧，最多3轮），支撑跨多轮指代
 
     # ---------- 流程日志/辅助控制字段 ----------
     node_path: list[str]

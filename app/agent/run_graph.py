@@ -21,6 +21,7 @@ from app.agent.state import (
     KEY_GENERATED_REASONING,
     KEY_GENERATED_SQL,
     KEY_NODE_PATH,
+    KEY_HISTORY,
     KEY_PREV_ANSWER,
     KEY_PREV_QUESTION,
     KEY_PREV_SQL,
@@ -40,6 +41,9 @@ from app.rag.documents import KnowledgeChunk
 
 # 日志对象
 logger = logging.getLogger(__name__)
+
+# 跨多轮指代支持的历史轮数上限（如"那前年呢？"跨三轮引用）
+MAX_HISTORY_TURNS = 3
 
 
 @dataclass
@@ -108,14 +112,35 @@ async def build_turn_input(
     """
     # 初始化上一轮上下文为空字符串
     prev_question = prev_sql = prev_answer = ""
+    # 最近多轮对话（新→旧），每轮 {"question","sql","answer"}；用于跨多轮指代
+    turns: list[dict] = []
     try:
-        # 从checkpointer读取该对话thread_id对应的最新状态快照
-        snapshot = await app.aget_state({"configurable": {"thread_id": conversation_id or "default"}})
+        cfg = {"configurable": {"thread_id": conversation_id or "default"}}
+        # 从checkpointer读取该对话thread_id对应的最新状态快照（上一轮）
+        snapshot = await app.aget_state(cfg)
         if snapshot and snapshot.values:
             # 提取上一轮的问题、SQL、最终答案，作为本轮多轮上下文
             prev_question = str(snapshot.values.get("question", "") or "")
             prev_sql = str(snapshot.values.get(KEY_GENERATED_SQL, "") or "")
             prev_answer = str(snapshot.values.get(KEY_FINAL_ANSWER, "") or "")
+
+        # 【跨多轮指代】快照历史按节点步从新到旧产出——同一轮的每个节点
+        # 都有一个快照且 question 相同，按 question 去重即得到"轮次"序列。
+        # 最多取 MAX_HISTORY_TURNS 轮，支撑"那前年呢？"这类跨三轮引用。
+        seen_questions: set[str] = set()
+        async for snap in app.aget_state_history(cfg, limit=100):
+            values = snap.values or {}
+            q = str(values.get("question", "") or "")
+            if not q or q in seen_questions:
+                continue
+            seen_questions.add(q)
+            turns.append({
+                "question": q,
+                "sql": str(values.get(KEY_GENERATED_SQL, "") or ""),
+                "answer": str(values.get(KEY_FINAL_ANSWER, "") or ""),
+            })
+            if len(turns) >= MAX_HISTORY_TURNS:
+                break
     except Exception as e:  # noqa: BLE001 捕获全部异常，不向上抛出
         # 读取历史状态失败仅打警告日志，不阻断本轮执行
         logger.warning("读取上一轮对话状态失败: %s", e)
@@ -134,6 +159,8 @@ async def build_turn_input(
         KEY_PREV_QUESTION: prev_question,
         KEY_PREV_SQL: prev_sql,
         KEY_PREV_ANSWER: prev_answer,
+        # 【跨多轮指代】最近多轮对话（新→旧），Prompt渲染时逐轮展开
+        KEY_HISTORY: turns,
     }
 
 
