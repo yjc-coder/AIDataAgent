@@ -31,6 +31,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from app.agent.nodes import (
     intent_node,
+    memory_update_node,
     report_node,
     schema_recall_node,
     sql_execute_node,
@@ -50,6 +51,7 @@ from app.rag.retriever import retriever_module  # 模块引用，单元测试可
 from app.rag.documents import KnowledgeChunk
 from app.agent.text2sql import text2sql_module  # 模块引用，单元测试可以monkey-patch打补丁mock
 from app.agent.sql_runner import sql_runner_module  # 模块引用，单元测试可以monkey-patch打补丁mock
+from app.agent.prompts import load as load_prompt
 from app.llm.client import get_chat_model
 from app.tools import execute_sql_tool, search_schema_tool
 
@@ -198,6 +200,25 @@ async def _report(
     return msg.content if hasattr(msg, "content") else str(msg)
 
 
+async def _summarize_memory(old_summary: str, turn: dict) -> str:
+    """把滑出短期窗口的一轮对话归纳进长期记忆滚动总结。"""
+    chat = get_chat_model()
+    try:
+        chat = chat.bind(temperature=0)
+    except Exception:  # noqa: BLE001 — bind() is optional
+        pass
+    prompt = load_prompt("memory_update").format(
+        old_summary=old_summary or "（空——尚无更早对话）",
+        question=turn.get("question", "") or "（无）",
+        sql=turn.get("sql", "") or "（无）",
+        answer=turn.get("answer", "") or "（无）",
+    )
+    from langchain_core.messages import HumanMessage
+
+    msg = await chat.ainvoke([HumanMessage(content=prompt)])
+    return msg.content if hasattr(msg, "content") else str(msg)
+
+
 # ===================== 构建LangGraph状态图 =====================
 
 def _build_state() -> StateGraph:
@@ -212,6 +233,7 @@ def _build_state() -> StateGraph:
     g.add_node("sql_generate", sql_generate_node)
     g.add_node("sql_execute", sql_execute_node)
     g.add_node("report", report_node)
+    g.add_node("memory_update", memory_update_node)
 
     # 图入口：START → intent节点
     g.add_edge(START, "intent")
@@ -250,7 +272,8 @@ def _build_state() -> StateGraph:
     # 固定边：sql执行 → report总结
     g.add_edge("sql_execute", "report")
     # report执行完成，流程结束
-    g.add_edge("report", END)
+    g.add_edge("report", "memory_update")
+    g.add_edge("memory_update", END)
 
     return g
 
@@ -274,6 +297,7 @@ def init_default_helpers() -> None:
         sql_runner=_execute,
         report_generator=_report,
         tool_decider=_decide_tools,
+        memory_summarizer=_summarize_memory,
     )
 
 

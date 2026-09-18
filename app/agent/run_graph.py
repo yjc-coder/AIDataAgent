@@ -22,6 +22,7 @@ from app.agent.state import (
     KEY_GENERATED_SQL,
     KEY_NODE_PATH,
     KEY_HISTORY,
+    KEY_MEMORY_SUMMARY,
     KEY_PREV_ANSWER,
     KEY_PREV_QUESTION,
     KEY_PREV_SQL,
@@ -112,6 +113,7 @@ async def build_turn_input(
     """
     # 初始化上一轮上下文为空字符串
     prev_question = prev_sql = prev_answer = ""
+    memory_summary = ""
     # 最近多轮对话（新→旧），每轮 {"question","sql","answer"}；用于跨多轮指代
     turns: list[dict] = []
     try:
@@ -123,6 +125,8 @@ async def build_turn_input(
             prev_question = str(snapshot.values.get("question", "") or "")
             prev_sql = str(snapshot.values.get(KEY_GENERATED_SQL, "") or "")
             prev_answer = str(snapshot.values.get(KEY_FINAL_ANSWER, "") or "")
+            # 长期记忆：滑出短期窗口的对话滚动总结（memory_update_node 维护）
+            memory_summary = str(snapshot.values.get(KEY_MEMORY_SUMMARY, "") or "")
 
         # 【跨多轮指代】快照历史按节点步从新到旧产出——同一轮的每个节点
         # 都有一个快照且 question 相同，按 question 去重即得到"轮次"序列。
@@ -161,6 +165,8 @@ async def build_turn_input(
         KEY_PREV_ANSWER: prev_answer,
         # 【跨多轮指代】最近多轮对话（新→旧），Prompt渲染时逐轮展开
         KEY_HISTORY: turns,
+        # 【分层记忆】长期记忆滚动总结（首轮为空字符串）
+        KEY_MEMORY_SUMMARY: memory_summary,
     }
 
 

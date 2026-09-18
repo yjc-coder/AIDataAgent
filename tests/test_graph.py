@@ -333,7 +333,8 @@ async def test_full_graph_data_query_path():
     assert final["generated_sql"] == "SELECT 1"
     assert final["row_count"] == 1
     assert final["final_answer"] == "the answer"
-    assert final["node_path"][-1] == "report"
+    assert final["node_path"][-1] == "memory_update"  # 图收尾节点：长期记忆更新
+    assert final["node_path"][-2] == "report"
 
 
 @pytest.mark.asyncio
@@ -418,7 +419,7 @@ async def test_full_graph_records_node_path_for_trace():
     app = get_compiled_graph()
     cfg = {"configurable": {"thread_id": "t-trace"}}
     final = await app.ainvoke({"question": "查询"}, config=cfg)
-    assert final["node_path"] == ["intent", "schema_recall", "sql_generate", "sql_execute", "report"]
+    assert final["node_path"] == ["intent", "schema_recall", "sql_generate", "sql_execute", "report", "memory_update"]
 
 
 # ---------------------------------------------------------------------------

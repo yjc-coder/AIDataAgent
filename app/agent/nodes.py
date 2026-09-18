@@ -25,6 +25,7 @@ from app.agent.state import (
     KEY_FINAL_ANSWER,
     KEY_GENERATED_REASONING,
     KEY_HISTORY,
+    KEY_MEMORY_SUMMARY,
     KEY_GENERATED_SQL,
     KEY_INTENT,
     KEY_NODE_PATH,
@@ -79,6 +80,7 @@ _sql_generator: SQLGenerator | None = None
 _sql_runner: SQLRunner | None = None
 _report_generator: ReportGenerator | None = None
 _tool_decider: ToolDecider | None = None
+_memory_summarizer: "Callable[[str, dict], Awaitable[str]] | None" = None
 
 
 def set_helpers(
@@ -89,6 +91,7 @@ def set_helpers(
     sql_runner: SQLRunner,
     report_generator: ReportGenerator,
     tool_decider: ToolDecider | None = None,
+    memory_summarizer: "Callable[[str, dict], Awaitable[str]] | None" = None,
 ) -> None:
     """
     注入各个辅助函数的真实实现（服务启动/单元测试时调用一次）
@@ -96,13 +99,14 @@ def set_helpers(
     tool_decider 为可选参数：仅工具调用节点依赖它，大部分单元测试不会走到这个节点。
     """
     global _intent_classifier, _schema_recaller, _sql_generator, _sql_runner
-    global _report_generator, _tool_decider
+    global _report_generator, _tool_decider, _memory_summarizer
     _intent_classifier = intent_classifier
     _schema_recaller = schema_recaller
     _sql_generator = sql_generator
     _sql_runner = sql_runner
     _report_generator = report_generator
     _tool_decider = tool_decider
+    _memory_summarizer = memory_summarizer
 
 
 def _mark(node: str, state: AgentState,** delta: Any) -> dict[str, Any]:
@@ -356,6 +360,12 @@ def _format_prev_steps(state: AgentState) -> str:
 
     labels = ["上一轮", "更早一轮", "更早两轮", "更早三轮"]
     parts: list[str] = []
+    memory = state.get(KEY_MEMORY_SUMMARY, "") or ""
+    if memory:
+        # 长期记忆放最前：它记录的是比"更早三轮"还要早的对话事实
+        parts.append(f"【长期记忆——最早几轮对话的总结】{memory}")
+        parts.append("（注意：上面总结里的事实比下方最近3轮更早；"
+                     "当用户问【我最早问过什么】这类跨越长期窗口的问题时，以总结为准）")
     for i, turn in enumerate(turns[: len(labels)]):
         label = labels[i]
         parts.append(f"{label}用户问题: {turn.get('question', '')}")
@@ -494,3 +504,40 @@ async def report_node(state: AgentState) -> dict[str, Any]:
         )
 
     return _mark("report", state, final_answer=answer)
+
+
+async def memory_update_node(state: AgentState) -> dict[str, Any]:
+    """
+    长期记忆更新节点（第11阶段）：图收尾时运行。
+
+    短期记忆只保留最近3轮原文（state.history）；每当一轮对话滑出这个
+    窗口，就用 LLM 把它归纳进滚动总结（memory_summary），实现
+    "短期记原文、长期记摘要"的分层记忆。窗口未满（前几轮）时无需归纳。
+
+    容错策略：归纳失败仅告警并保留旧总结，绝不影响本轮已产出的答案。
+    """
+    if state.get(KEY_SKIP_REPORT):
+        # 轻量模式（只生成SQL不执行）与报告节点同进退，不做额外LLM调用
+        return _mark("memory_update", state)
+
+    history = state.get(KEY_HISTORY, []) or []
+    incoming = state.get(KEY_MEMORY_SUMMARY, "") or ""
+
+    # 窗口未满3轮 → 没有轮次滑出，长期记忆不变
+    if len(history) < 3 or _memory_summarizer is None:
+        return _mark("memory_update", state)
+
+    oldest = history[-1]  # history 新→旧，最后一个即将滑出窗口
+    try:
+        summary = await _memory_summarizer(incoming, oldest)
+        summary = str(summary or "").strip()
+    except Exception as e:  # noqa: BLE001
+        logger.exception("长期记忆归纳失败")
+        summary = ""  # 失败 → 保留旧总结
+
+    if not summary:
+        summary = incoming
+
+    # 注意：不修改 state.history —— 下一轮 build_turn_input 会按3轮上限
+    # 重新从快照重建短期窗口，滑出的轮次已并入长期记忆，天然不重复。
+    return _mark("memory_update", state, memory_summary=summary)

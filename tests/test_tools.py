@@ -456,7 +456,7 @@ async def test_full_graph_detours_through_tool_call_on_low_confidence(monkeypatc
     final = await app.ainvoke({"question": "查询"}, config={"configurable": {"thread_id": "t-tool-detour"}})
 
     assert calls == ["recall", "gen", "run", "report"]  # recall ran once; no second recall
-    assert final["node_path"] == ["intent", "schema_recall", "tool_call", "sql_generate", "sql_execute", "report"]
+    assert final["node_path"] == ["intent", "schema_recall", "tool_call", "sql_generate", "sql_execute", "report", "memory_update"]
     assert final["tool_called"] is True
     assert final["row_count"] == 1
     # tool-found schema flowed into sql_generate without a second RAG query
@@ -498,7 +498,7 @@ async def test_full_graph_skips_tool_call_on_good_recall():
     final = await app.ainvoke({"question": "查询"}, config={"configurable": {"thread_id": "t-no-tool"}})
 
     assert "tool_call" not in final["node_path"]
-    assert final["node_path"] == ["intent", "schema_recall", "sql_generate", "sql_execute", "report"]
+    assert final["node_path"] == ["intent", "schema_recall", "sql_generate", "sql_execute", "report", "memory_update"]
 
 
 @pytest.mark.asyncio
